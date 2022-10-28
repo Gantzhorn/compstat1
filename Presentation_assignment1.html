@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>Assignment 1</title>
+    <meta charset="utf-8" />
+    <meta name="author" content="Lucas Støjko &amp; Anders Gantzhorn" />
+    <script src="libs/header-attrs-2.16/header-attrs.js"></script>
+    <link href="libs/remark-css-0.0.1/default.css" rel="stylesheet" />
+    <link href="libs/remark-css-0.0.1/default-fonts.css" rel="stylesheet" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+.title[
+# Assignment 1
+]
+.subtitle[
+## Smoothing
+]
+.author[
+### Lucas Støjko &amp; Anders Gantzhorn
+]
+.institute[
+### Københavns univesitet
+]
+.date[
+### 22-09-2022
+]
+
+---
+
+# Task
+Epanechnikov kernel as a kernel density estimator
+$$ K(x)=\frac{3}{4}\cdot \left(1-x^2\right)1_{[-1,1]} $$
+AMISE to find optimal bandwidth.
+
+Note that we have shown that 
+
+`$$||K||_2^2 = \frac{3}{5}, \qquad \sigma^2_K = \frac{1}{5}$$`
+Which we can plug into the oracle bandwidth along with the assumption that our underlying data is gaussian.
+`$$\hat f(x) = \frac{1}{nh}\sum_{i=1}^{n}K\left(\frac{x-x_i}{h}\right)$$`
+---
+# Used libraries
+
+
+```r
+library(microbenchmark)
+library(magrittr) # Not used for computations
+library(ggplot2)
+theme_set(theme_bw())
+library(Rcpp)
+```
+---
+# Kernel implementations in R
+
+```r
+kernel_epanechnikov_R &lt;- function(x) {
+  0.75 * (1 - x^2) * (abs(x) &lt;= 1)
+}
+
+kernel_gaussian_R &lt;- function(x) {
+  0.3989422804014327 * exp(-0.5 * x^2)
+}
+
+kernel_uniform_R &lt;- function(x) {
+  0.5 * (abs(x) &lt;= 1)
+}
+```
+---
+# Calculation of density in R
+
+```r
+calculate_density_R &lt;- function(data,
+                                calculation_points,
+                                lambda,
+                                kernel_number) {
+  
+  kernel_call &lt;- switch(kernel_number,
+                        "1" = kernel_gaussian_R,
+                        "2" = kernel_epanechnikov_R,
+                        "3" = kernel_uniform_R)
+  
+  out_vector &lt;- numeric(length(calculation_points))
+  
+  for(i in seq_along(calculation_points)) {
+    out_vector[i] &lt;- sum(
+      kernel_call((data - calculation_points[i]) / lambda)
+      )
+  }
+  
+  out_vector / (lambda * length(data))
+}
+```
+
+
+---
+# Kernel- and density implementation in Rcpp
+
+
+```cpp
+#include &lt;Rcpp.h&gt;
+#include &lt;cmath&gt;
+
+double kernel_epanechnikov(double x) {
+  if(std::abs(x) &gt; 1) {
+    return 0;
+  } else {
+    return 0.75 * (1 - x * x);
+  }
+}
+
+double kernel_gaussian(double x) {
+  return 0.3989422804014327 * std::exp(-0.5 * x * x);
+}
+
+double kernel_uniform(double x) {
+  if(std::abs(x) &gt; 1) {
+    return 0;
+  } else {
+    return 0.5;
+  }
+}
+```
+
+---
+
+```cpp
+// [[Rcpp::export]]
+Rcpp::NumericVector calculate_density_cpp(Rcpp::NumericVector data,
+                                         Rcpp::NumericVector calculation_points,
+                                         double lambda,
+                                         int kernel_number) {
+  
+  
+  Rcpp::NumericVector result_vector(calculation_points.length());
+  
+  double (*kernel)(double);
+  
+  switch(kernel_number) {
+  case 1:
+    kernel = &amp;kernel_gaussian;
+    break;
+    
+  case 2:
+    kernel = &amp;kernel_epanechnikov;
+    break;
+    
+  case 3:
+    kernel = &amp;kernel_uniform;
+    break;
+    
+  default:
+    kernel = &amp;kernel_gaussian;
+  break;
+  }
+
+}
+```
+
+
+
+---
+
+
+```cpp
+  
+  int points = calculation_points.length();
+  int data_length = data.length();
+  
+  for(int i = 0; i &lt; points; ++i) {
+    
+    result_vector[i] = 0;
+    
+    for(int j = 0; j &lt; data_length; ++j) {
+      result_vector[i] += kernel((data[j] - calculation_points[i]) / lambda);
+    }
+    
+  }
+  
+  return result_vector / (lambda * data_length);
+
+```
+
+---
+
+# Benchmarking
+
+
+```r
+test &lt;- rnorm(1000L)
+x1 &lt;- seq(min(test), max(test), length.out = 512L)
+
+microbenchmark(calculate_density_cpp(test, x1, 0.6, 2),
+               calculate_density_R(test, x1, 0.6, 2))
+```
+
+```
+## Unit: milliseconds
+##                                     expr   min      lq      mean   median
+##  calculate_density_cpp(test, x1, 0.6, 2) 2.119 2.14460  2.981993  2.32515
+##    calculate_density_R(test, x1, 0.6, 2) 5.905 8.45875 14.002405 13.34410
+##        uq     max neval
+##   4.39340  6.2267   100
+##  17.22685 42.9360   100
+```
+
+
+---
+# Oracle bandwidth
+`$$h_{\text{plug-in oracle}}=\left(\frac{8\sqrt{\pi}||K||_2^2}{3\sigma_K^4}\right)^{1/5}\tilde\sigma n^{-1/5}\quad \tilde\sigma = \min\{\hat\sigma, \text{IQR}/1.34\}$$`
+
+
+```r
+kernel_constant &lt;- function(x) {
+  UseMethod("kernel_constant")
+}
+
+kernel_constant.oracle_bandwidth &lt;- function(x) {
+  (8 * sqrt(pi) * x$square_norm / (3 * x$sigma))^0.2
+}
+
+epanechnikov_lambda &lt;- function() {
+  structure(
+    list(
+      name = "Epanechnikov",
+      sigma = 1 / 25,
+      square_norm = 3 / 5
+    ),
+    class = "oracle_bandwidth"
+  )
+}
+```
+
+
+
+---
+# Plugin values from AMISE-estimate
+
+
+```r
+plugin_oracle_bandwidth &lt;- function(.data, .bandwidth_selector = "gaussian") {
+  
+  kernel_attr &lt;- switch(
+    .bandwidth_selector,
+    "gaussian" = gaussian_lambda(),
+    "epanechnikov" = epanechnikov_lambda(),
+    "uniform" = uniform_lambda()
+  )
+  
+  sigma_silverman &lt;- min(sd(.data), IQR(.data) / 1.34)
+  
+  constant &lt;- kernel_constant(kernel_attr)
+  
+  constant * sigma_silverman * length(.data)^(-0.2)
+  
+}
+```
+
+---
+# Implementation of Rcpp
+
+```r
+estimate_density &lt;- function(.data,
+                             .kernel = "gaussian",
+                             .bw = plugin_oracle_bandwidth,
+                             .x = NULL,
+                             .npoints = 512L) {
+  
+  if(is.null(.x)) {
+    start_point &lt;- min(.data)
+    end_point &lt;- max(.data)
+    
+    .x &lt;- seq(start_point, end_point, length.out = .npoints)
+  }
+  
+  .kernel_number &lt;- switch(
+    .kernel,
+    "gaussian" = 1L,
+    "epanechnikov" = 2L,
+    "uniform" = 3L
+  )
+```
+
+---
+
+```r
+  .bandwidth &lt;- if(is.numeric(.bw)) {
+    .bw
+  } else {
+    .bw(.data, .kernel)
+    
+  }
+  
+  .estimate &lt;- calculate_density_cpp(data = .data,
+                                    calculation_points = .x,
+                                    lambda = .bandwidth,
+                                    kernel_number = .kernel_number)
+  
+  structure(
+    list(
+      x = .x,
+      y = .estimate,
+      bandwidth = .bandwidth,
+      kernel_name = .kernel
+    ),
+    class = "densityEstimate"
+  )
+  
+}
+```
+
+
+
+
+
+---
+# Initial benchmarking
+
+```r
+microbenchmark(plugin_oracle_bandwidth(test, "epanechnikov"))
+```
+
+```
+## Unit: microseconds
+##                                           expr   min    lq    mean median  uq
+##  plugin_oracle_bandwidth(test, "epanechnikov") 132.7 135.3 340.649  138.8 158
+##      max neval
+##  15718.4   100
+```
+
+```r
+microbenchmark(
+  RCPP = estimate_density(test, .kernel = "epanechnikov"),
+  R = estimate_density_R(test, .kernel = "epanechnikov"),
+  DEFAULT = density(test, kernel = "epanechnikov", bw = "nrd")
+  )
+```
+
+```
+## Unit: microseconds
+##     expr    min      lq      mean   median       uq     max neval
+##     RCPP 2298.3 2417.00  3633.614  2613.30  5081.35 19308.0   100
+##        R 6014.3 7656.45 13863.794 12150.60 18078.80 36389.1   100
+##  DEFAULT  564.4  746.90  1078.109   909.05  1330.00  5161.6   100
+```
+
+---
+
+# Benchmarking
+
+```r
+test2 &lt;- rnorm(8192L)
+
+rcpp_density_times &lt;- 
+  microbenchmark(
+    estimate_density(test2[1:32], .kernel = "epanechnikov"),
+    estimate_density(test2[1:64], .kernel = "epanechnikov"),
+    estimate_density(test2[1:128], .kernel = "epanechnikov"),
+    estimate_density(test2[1:256], .kernel = "epanechnikov"),
+    estimate_density(test2[1:512], .kernel = "epanechnikov"),
+    estimate_density(test2[1:1024], .kernel = "epanechnikov"),
+    estimate_density(test2[1:2048], .kernel = "epanechnikov"),
+    estimate_density(test2[1:4096], .kernel = "epanechnikov"),
+    estimate_density(test2[1:8192], .kernel = "epanechnikov"),
+    unit = "milliseconds"
+  ) %&gt;% 
+  summary() %&gt;% 
+  extract2("median")
+```
+
+
+
+---
+# Result of benchmarking
+&lt;img src="Presentation_assignment1_files/figure-html/unnamed-chunk-19-1.png" style="display: block; margin: auto;" /&gt;
+
+---
+# Accuracy on simulated data
+&lt;img src="Presentation_assignment1_files/figure-html/unnamed-chunk-20-1.png" style="display: block; margin: auto;" /&gt;
+
+---
+# Accuracy on real data
+&lt;img src="Presentation_assignment1_files/figure-html/unnamed-chunk-21-1.png" style="display: block; margin: auto;" /&gt;
+
+
+
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+"ratio": "16:9",
+"highlightStyle": "githubs",
+"highlightLines": true,
+"countIncrementalSlides": false
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+// add `data-at-shortcutkeys` attribute to <body> to resolve conflicts with JAWS
+// screen reader (see PR #262)
+(function(d) {
+  let res = {};
+  d.querySelectorAll('.remark-help-content table tr').forEach(tr => {
+    const t = tr.querySelector('td:nth-child(2)').innerText;
+    tr.querySelectorAll('td:first-child .key').forEach(key => {
+      const k = key.innerText;
+      if (/^[a-z]$/.test(k)) res[k] = t;  // must be a single letter (key)
+    });
+  });
+  d.body.setAttribute('data-at-shortcutkeys', JSON.stringify(res));
+})(document);
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();
+// adds .remark-code-has-line-highlighted class to <pre> parent elements
+// of code chunks containing highlighted lines with class .remark-code-line-highlighted
+(function(d) {
+  const hlines = d.querySelectorAll('.remark-code-line-highlighted');
+  const preParents = [];
+  const findPreParent = function(line, p = 0) {
+    if (p > 1) return null; // traverse up no further than grandparent
+    const el = line.parentElement;
+    return el.tagName === "PRE" ? el : findPreParent(el, ++p);
+  };
+
+  for (let line of hlines) {
+    let pre = findPreParent(line);
+    if (pre && !preParents.includes(pre)) preParents.push(pre);
+  }
+  preParents.forEach(p => p.classList.add("remark-code-has-line-highlighted"));
+})(document);</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>

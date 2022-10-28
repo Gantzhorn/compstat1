@@ -1,0 +1,499 @@
+---
+title: "Assignment 1"
+subtitle: "Smoothing"
+author: "Lucas Støjko & Anders Gantzhorn"
+institute: "Københavns univesitet"
+date: "22-09-2022"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    nature: 
+      ratio: 16:9
+      highlightStyle: githubs
+      highlightLines: true
+      countIncrementalSlides: false
+---
+# Task
+Epanechnikov kernel as a kernel density estimator
+$$ K(x)=\frac{3}{4}\cdot \left(1-x^2\right)1_{[-1,1]} $$
+AMISE to find optimal bandwidth.
+
+Note that we have shown that 
+
+$$||K||_2^2 = \frac{3}{5}, \qquad \sigma^2_K = \frac{1}{5}$$
+Which we can plug into the oracle bandwidth along with the assumption that our underlying data is gaussian.
+$$\hat f(x) = \frac{1}{nh}\sum_{i=1}^{n}K\left(\frac{x-x_i}{h}\right)$$
+---
+# Used libraries
+
+```{r}
+library(microbenchmark)
+library(magrittr) # Not used for computations
+library(ggplot2)
+theme_set(theme_bw())
+library(Rcpp)
+```
+---
+# Kernel implementations in R
+```{r}
+kernel_epanechnikov_R <- function(x) {
+  0.75 * (1 - x^2) * (abs(x) <= 1)
+}
+
+kernel_gaussian_R <- function(x) {
+  0.3989422804014327 * exp(-0.5 * x^2)
+}
+
+kernel_uniform_R <- function(x) {
+  0.5 * (abs(x) <= 1)
+}
+```
+---
+# Calculation of density in R
+```{r, size="big"}
+calculate_density_R <- function(data,
+                                calculation_points,
+                                lambda,
+                                kernel_number) {
+  
+  kernel_call <- switch(kernel_number,
+                        "1" = kernel_gaussian_R,
+                        "2" = kernel_epanechnikov_R,
+                        "3" = kernel_uniform_R)
+  
+  out_vector <- numeric(length(calculation_points))
+  
+  for(i in seq_along(calculation_points)) {
+    out_vector[i] <- sum(
+      kernel_call((data - calculation_points[i]) / lambda)
+      )
+  }
+  
+  out_vector / (lambda * length(data))
+}
+
+```
+
+
+---
+# Kernel- and density implementation in Rcpp
+
+```{Rcpp, eval = FALSE}
+#include <Rcpp.h>
+#include <cmath>
+
+double kernel_epanechnikov(double x) {
+  if(std::abs(x) > 1) {
+    return 0;
+  } else {
+    return 0.75 * (1 - x * x);
+  }
+}
+
+double kernel_gaussian(double x) {
+  return 0.3989422804014327 * std::exp(-0.5 * x * x);
+}
+
+double kernel_uniform(double x) {
+  if(std::abs(x) > 1) {
+    return 0;
+  } else {
+    return 0.5;
+  }
+}
+```
+
+---
+```{Rcpp, eval = FALSE, size = "small"}
+// [[Rcpp::export]]
+Rcpp::NumericVector calculate_density_cpp(Rcpp::NumericVector data,
+                                         Rcpp::NumericVector calculation_points,
+                                         double lambda,
+                                         int kernel_number) {
+  
+  
+  Rcpp::NumericVector result_vector(calculation_points.length());
+  
+  double (*kernel)(double);
+  
+  switch(kernel_number) {
+  case 1:
+    kernel = &kernel_gaussian;
+    break;
+    
+  case 2:
+    kernel = &kernel_epanechnikov;
+    break;
+    
+  case 3:
+    kernel = &kernel_uniform;
+    break;
+    
+  default:
+    kernel = &kernel_gaussian;
+  break;
+  }
+
+}
+```
+
+```{r echo = FALSE}
+sourceCpp("./src/estimate_density.cpp")
+
+```
+
+---
+
+```{Rcpp, eval = FALSE, size = "tiny"}
+  
+  int points = calculation_points.length();
+  int data_length = data.length();
+  
+  for(int i = 0; i < points; ++i) {
+    
+    result_vector[i] = 0;
+    
+    for(int j = 0; j < data_length; ++j) {
+      result_vector[i] += kernel((data[j] - calculation_points[i]) / lambda);
+    }
+    
+  }
+  
+  return result_vector / (lambda * data_length);
+
+```
+
+---
+
+# Benchmarking
+
+```{r}
+test <- rnorm(1000L)
+x1 <- seq(min(test), max(test), length.out = 512L)
+
+microbenchmark(calculate_density_cpp(test, x1, 0.6, 2),
+               calculate_density_R(test, x1, 0.6, 2))
+```
+
+
+---
+# Oracle bandwidth
+$$h_{\text{plug-in oracle}}=\left(\frac{8\sqrt{\pi}||K||_2^2}{3\sigma_K^4}\right)^{1/5}\tilde\sigma n^{-1/5}\quad \tilde\sigma = \min\{\hat\sigma, \text{IQR}/1.34\}$$
+
+```{r}
+kernel_constant <- function(x) {
+  UseMethod("kernel_constant")
+}
+
+kernel_constant.oracle_bandwidth <- function(x) {
+  (8 * sqrt(pi) * x$square_norm / (3 * x$sigma))^0.2
+}
+
+epanechnikov_lambda <- function() {
+  structure(
+    list(
+      name = "Epanechnikov",
+      sigma = 1 / 25,
+      square_norm = 3 / 5
+    ),
+    class = "oracle_bandwidth"
+  )
+}
+```
+
+```{r, echo = FALSE}
+
+gaussian_lambda <- function() {
+  structure(
+    list(
+      name = "Gaussian",
+      sigma = 1,
+      square_norm = 1 / (2 * sqrt(pi))
+    ),
+    class = "oracle_bandwidth"
+  )
+}
+uniform_lambda <- function() {
+  structure(
+    list(
+      name = "Uniform",
+      sigma = 1 / 9,
+      square_norm = 1 / 2
+    ),
+    class = "oracle_bandwidth"
+  )
+}
+```
+
+---
+# Plugin values from AMISE-estimate
+
+```{r}
+plugin_oracle_bandwidth <- function(.data, .bandwidth_selector = "gaussian") {
+  
+  kernel_attr <- switch(
+    .bandwidth_selector,
+    "gaussian" = gaussian_lambda(),
+    "epanechnikov" = epanechnikov_lambda(),
+    "uniform" = uniform_lambda()
+  )
+  
+  sigma_silverman <- min(sd(.data), IQR(.data) / 1.34)
+  
+  constant <- kernel_constant(kernel_attr)
+  
+  constant * sigma_silverman * length(.data)^(-0.2)
+  
+}
+```
+
+---
+# Implementation of Rcpp
+```{R, eval = FALSE}
+estimate_density <- function(.data,
+                             .kernel = "gaussian",
+                             .bw = plugin_oracle_bandwidth,
+                             .x = NULL,
+                             .npoints = 512L) {
+  
+  if(is.null(.x)) {
+    start_point <- min(.data)
+    end_point <- max(.data)
+    
+    .x <- seq(start_point, end_point, length.out = .npoints)
+  }
+  
+  .kernel_number <- switch(
+    .kernel,
+    "gaussian" = 1L,
+    "epanechnikov" = 2L,
+    "uniform" = 3L
+  )
+```
+
+---
+```{R, eval = FALSE}
+  .bandwidth <- if(is.numeric(.bw)) {
+    .bw
+  } else {
+    .bw(.data, .kernel)
+    
+  }
+  
+  .estimate <- calculate_density_cpp(data = .data,
+                                    calculation_points = .x,
+                                    lambda = .bandwidth,
+                                    kernel_number = .kernel_number)
+  
+  structure(
+    list(
+      x = .x,
+      y = .estimate,
+      bandwidth = .bandwidth,
+      kernel_name = .kernel
+    ),
+    class = "densityEstimate"
+  )
+  
+}
+
+```
+
+```{r, echo = FALSE}
+estimate_density <- function(.data, .kernel = "gaussian", .bw = plugin_oracle_bandwidth, .x = NULL, .npoints = 512L) {
+  
+  if(is.null(.x)) {
+    start_point <- min(.data)
+    end_point <- max(.data)
+    
+    .x <- seq(start_point, end_point, length.out = .npoints)
+  }
+  
+  .kernel_number <- switch(
+    .kernel,
+    "gaussian" = 1L,
+    "epanechnikov" = 2L,
+    "uniform" = 3L
+  )
+  
+  .bandwidth <- if(is.numeric(.bw)) {
+    .bw
+  } else {
+    .bw(.data, .kernel)
+    
+  }
+  
+  .estimate <- calculate_density_cpp(data = .data,
+                                    calculation_points = .x,
+                                    lambda = .bandwidth,
+                                    kernel_number = .kernel_number)
+  
+  structure(
+    list(
+      x = .x,
+      y = .estimate,
+      bandwidth = .bandwidth,
+      kernel_name = .kernel
+    ),
+    class = "densityEstimate"
+  )
+  
+}
+
+```
+
+```{r, echo = FALSE}
+
+estimate_density_R <- function(.data, 
+                               .kernel = "gaussian", 
+                               .bw = plugin_oracle_bandwidth, 
+                               .x = NULL, 
+                               .npoints = 512L) {
+  
+  if(is.null(.x)) {
+    start_point <- min(.data)
+    end_point <- max(.data)
+    
+    .x <- seq(start_point, end_point, length.out = .npoints)
+  }
+  
+  .kernel_number <- switch(
+    .kernel,
+    "gaussian" = 1L,
+    "epanechnikov" = 2L,
+    "uniform" = 3L
+  )
+  
+  .bandwidth <- if(is.numeric(.bw)) {
+    .bw
+  } else {
+    .bw(.data, .kernel)
+  }
+  
+  .estimate <- calculate_density_R(data = .data,
+                                       calculation_points = .x,
+                                       lambda = .bandwidth,
+                                       kernel_number = .kernel_number)
+  
+  structure(
+    list(
+      x = .x,
+      y = .estimate,
+      bandwidth = .bandwidth,
+      kernel_name = .kernel
+    ),
+    class = "densityEstimate"
+  )
+  
+}
+
+```
+
+---
+# Initial benchmarking
+```{r}
+microbenchmark(plugin_oracle_bandwidth(test, "epanechnikov"))
+
+microbenchmark(
+  RCPP = estimate_density(test, .kernel = "epanechnikov"),
+  R = estimate_density_R(test, .kernel = "epanechnikov"),
+  DEFAULT = density(test, kernel = "epanechnikov", bw = "nrd")
+  )
+```
+
+---
+
+# Benchmarking
+```{r}
+test2 <- rnorm(8192L)
+
+rcpp_density_times <- 
+  microbenchmark(
+    estimate_density(test2[1:32], .kernel = "epanechnikov"),
+    estimate_density(test2[1:64], .kernel = "epanechnikov"),
+    estimate_density(test2[1:128], .kernel = "epanechnikov"),
+    estimate_density(test2[1:256], .kernel = "epanechnikov"),
+    estimate_density(test2[1:512], .kernel = "epanechnikov"),
+    estimate_density(test2[1:1024], .kernel = "epanechnikov"),
+    estimate_density(test2[1:2048], .kernel = "epanechnikov"),
+    estimate_density(test2[1:4096], .kernel = "epanechnikov"),
+    estimate_density(test2[1:8192], .kernel = "epanechnikov"),
+    unit = "milliseconds"
+  ) %>% 
+  summary() %>% 
+  extract2("median")
+```
+
+```{r, echo = FALSE}
+  r_density_times <- 
+  microbenchmark(
+    estimate_density_R(test2[1:32], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:64], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:128], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:256], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:512], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:1024], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:2048], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:4096], .kernel = "epanechnikov"),
+    estimate_density_R(test2[1:8192], .kernel = "epanechnikov"),
+    unit = "milliseconds"
+  ) %>% 
+  summary() %>% 
+  extract2("median")
+
+default_density_times <- 
+  microbenchmark(
+    density(test2[1:32], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:64], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:128], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:256], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:512], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:1024], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:2048], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:4096], kernel = "epanechnikov", bw = "nrd"),
+    density(test2[1:8192], kernel = "epanechnikov", bw = "nrd"),
+    unit = "milliseconds"
+  ) %>% 
+  summary() %>% 
+  extract2("median")
+
+plot_dataframe <- data.frame(times = c(rcpp_density_times, r_density_times, default_density_times),
+                             n = rep(c(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192), 3),
+                             implementation = rep(c("RCPP", "R", "Default"), each = 9))
+```
+
+---
+# Result of benchmarking
+```{r, echo = FALSE, fig.width = 15, fig.align='center'}
+plot_dataframe %>% 
+  ggplot(aes(x = n, y = times, col = implementation)) +
+  geom_line(size = 1) + 
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("Number of observations") +
+  ylab("Runtime [milliseconds]")
+```
+
+---
+# Accuracy on simulated data
+```{r, echo = FALSE, fig.align='center', fig.width = 15}
+# Plots of density estimates for simulated data
+density_plot <- estimate_density(test, "epanechnikov")
+default_density <- density(test, kernel = "epanechnikov", bw = "nrd")
+
+plot(density_plot)
+lines(default_density, col = "red", lwd = 2)
+```
+
+---
+# Accuracy on real data
+```{r, echo= FALSE, fig.align='center', fig.width = 15}
+density_plot_real <- estimate_density(infert$age, "epanechnikov")
+default_density_real <- density(infert$age, kernel = "epanechnikov", bw = "nrd")
+
+plot(density_plot_real)
+lines(default_density_real, col = "red", lwd = 2)
+```
+
+
+
