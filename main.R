@@ -9,7 +9,7 @@ sourceCpp("./src/estimate_density.cpp")
 
 source("./R/estimate_density_R.R")
 
-test <- rnorm(1000L)
+test <- rnorm(1000)
 x1 <- seq(min(test), max(test), length.out = 512L)
 
 microbenchmark(calculate_density_cpp(test, x1, 0.6, 2),
