@@ -40,7 +40,6 @@ uniform_lambda <- function() {
 }
 
 plugin_oracle_bandwidth <- function(.data, .bandwidth_selector = "gaussian") {
-  
   kernel_attr <- switch(
     .bandwidth_selector,
     "gaussian" = gaussian_lambda(),
@@ -53,5 +52,4 @@ plugin_oracle_bandwidth <- function(.data, .bandwidth_selector = "gaussian") {
   constant <- kernel_constant(kernel_attr)
   
   constant * sigma_silverman * length(.data)^(-0.2)
-  
 }
